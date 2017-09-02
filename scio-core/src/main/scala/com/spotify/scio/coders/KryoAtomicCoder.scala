@@ -17,8 +17,7 @@
 
 package com.spotify.scio.coders
 
-import java.io.{ByteArrayInputStream, InputStream, OutputStream}
-import java.nio.ByteBuffer
+import java.io.{InputStream, OutputStream}
 
 import com.esotericsoftware.kryo.io.{InputChunked, OutputChunked}
 import com.google.common.io.{ByteStreams, CountingOutputStream}
@@ -72,7 +71,7 @@ private object KryoRegistrarLoader {
 
 private[scio] class KryoAtomicCoder[T] extends AtomicCoder[T] {
 
-  import KryoAtomicCoder.kryo
+  import KryoAtomicCoder.kryoState
 
   private val logger = LoggerFactory.getLogger(this.getClass)
   private val header = -1
@@ -84,17 +83,26 @@ private[scio] class KryoAtomicCoder[T] extends AtomicCoder[T] {
 
     VarInt.encode(header, os)
 
-    val output = new OutputChunked(os)
-    kryo.get().writeClassAndObject(output, value)
-    output.endChunks()
-    output.flush()
+    val state = kryoState.get()
+
+    val chunked = state.output
+    chunked.setOutputStream(os)
+
+    state.kryo.writeClassAndObject(chunked, value)
+    chunked.endChunks()
+    chunked.flush()
   }
 
   override def decode(is: InputStream): T = {
+    val state = kryoState.get()
+
     val o = if (VarInt.decodeInt(is) == header) {
-      kryo.get().readClassAndObject(new InputChunked(is))
+      val chunked = state.input
+      chunked.setInputStream(is)
+
+      state.kryo.readClassAndObject(chunked)
     } else {
-      kryo.get().readClassAndObject(new Input(is))
+      state.kryo.readClassAndObject(new Input(state.input.getBuffer))
     }
 
     o.asInstanceOf[T]
@@ -149,18 +157,23 @@ private[scio] class KryoAtomicCoder[T] extends AtomicCoder[T] {
   private def kryoEncodedElementByteSize(obj: Any): Long = {
     val s = new CountingOutputStream(ByteStreams.nullOutputStream())
     val output = new Output(s)
-    kryo.get().writeClassAndObject(output, obj)
+    kryoState.get().kryo.writeClassAndObject(output, obj)
     output.flush()
     s.getCount + VarInt.getLength(s.getCount)
   }
 
 }
 
+/** Used for sharing Kryo instance and buffers */
+private[scio] final case class KryoState(kryo: Kryo, input: InputChunked, output: OutputChunked)
+
 private[scio] object KryoAtomicCoder {
   def apply[T]: Coder[T] = new KryoAtomicCoder[T]
 
-  private val kryo: ThreadLocal[Kryo] = new ThreadLocal[Kryo] {
-    override def initialValue(): Kryo = {
+  val bufferSize = 64 * 1024
+
+  private val kryoState: ThreadLocal[KryoState] = new ThreadLocal[KryoState] {
+    override def initialValue(): KryoState = {
       val k = KryoSerializer.registered.newKryo()
 
       k.forClass(new CoderSerializer(InstantCoder.of()))
@@ -184,7 +197,10 @@ private[scio] object KryoAtomicCoder {
       new AlgebirdRegistrar()(k)
       KryoRegistrarLoader.load(k)
 
-      k
+      val input = new InputChunked(bufferSize)
+      val output = new OutputChunked(bufferSize)
+
+      KryoState(k, input, output)
     }
   }
 }
