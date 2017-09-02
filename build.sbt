@@ -209,7 +209,8 @@ lazy val root: Project = Project(
   scalacOptions in (ScalaUnidoc, unidoc) += "-Ymacro-no-expand",
   unidocProjectFilter in (ScalaUnidoc, unidoc) := inAnyProject
     -- inProjects(scioCassandra2) -- inProjects(scioElasticsearch2)
-    -- inProjects(scioRepl) -- inProjects(scioSchemas) -- inProjects(scioExamples),
+    -- inProjects(scioRepl) -- inProjects(scioSchemas) -- inProjects(scioExamples)
+    -- inProjects(scioJmh),
   // unidoc handles class paths differently than compile and may give older
   // versions high precedence.
   unidocAllClasspaths in (ScalaUnidoc, unidoc) := {
@@ -236,7 +237,8 @@ lazy val root: Project = Project(
   scioTensorFlow,
   scioSchemas,
   scioExamples,
-  scioRepl
+  scioRepl,
+  scioJmh
 )
 
 lazy val scioCore: Project = Project(
@@ -560,6 +562,23 @@ lazy val scioRepl: Project = Project(
   scioCore,
   scioExtra
 )
+
+lazy val scioJmh: Project = Project(
+  "scio-jmh",
+  file("scio-jmh")
+).settings(
+  commonSettings,
+  noPublishSettings,
+  addCompilerPlugin(paradiseDependency),
+  sourceDirectory in Jmh := (sourceDirectory in Test).value,
+  classDirectory in Jmh := (classDirectory in Test).value,
+  dependencyClasspath in Jmh := (dependencyClasspath in Test).value,
+  libraryDependencies ++= Seq(
+    "org.slf4j" % "slf4j-nop" % slf4jVersion
+  )
+).dependsOn(
+  scioCore
+).enablePlugins(JmhPlugin)
 
 // =======================================================================
 // Site settings

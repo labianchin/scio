@@ -17,8 +17,7 @@
 
 package com.spotify.scio.coders
 
-import java.io.{ByteArrayInputStream, InputStream, OutputStream}
-import java.nio.ByteBuffer
+import java.io.{InputStream, OutputStream}
 
 import com.google.common.io.{ByteStreams, CountingOutputStream}
 import com.google.common.reflect.ClassPath
@@ -75,27 +74,15 @@ private[scio] class KryoAtomicCoder[T] extends AtomicCoder[T] {
 
   private val logger = LoggerFactory.getLogger(this.getClass)
 
-  override def encode(value: T, outStream: OutputStream): Unit = {
-    if (value == null) {
-      throw new CoderException("cannot encode a null value")
-    }
-    val os = new BufferedPrefixOutputStream(outStream)
+  override def encode(value: T, os: OutputStream): Unit = {
     val output = new Output(os)
     kryo.get().writeClassAndObject(output, value)
     output.flush()
-    os.finish()
   }
 
-  override def decode(inStream: InputStream): T = {
-    val o = if (VarInt.decodeInt(inStream) == -1) {
-      val is = new BufferedPrefixInputStream(inStream)
-      val obj = kryo.get().readClassAndObject(new Input(is))
-      is.finish()
-      obj
-    } else {
-      kryo.get().readClassAndObject(new Input(inStream))
-    }
-    o.asInstanceOf[T]
+  override def decode(is: InputStream): T = {
+    val obj = kryo.get().readClassAndObject(new Input(is))
+    obj.asInstanceOf[T]
   }
 
   // This method is called by PipelineRunner to sample elements in a PCollection and estimate
@@ -187,103 +174,3 @@ private[scio] object KryoAtomicCoder {
   }
 }
 
-/**
- * Buffered output stream that adds length prefix to each buffer block. Useful for large objects
- * or collections. Based on [[org.apache.beam.sdk.util.BufferedElementCountingOutputStream]].
- */
-private class BufferedPrefixOutputStream(private val os: OutputStream)
-  extends OutputStream {
-
-  private val buffer = ByteBuffer.allocate(64 * 1024)
-  private var finished = false
-
-  VarInt.encode(-1, os)
-
-  override def write(b: Int): Unit = {
-    require(!finished, "Stream has been finished. Can not add any more data.")
-    if (!buffer.hasRemaining) {
-      outputBuffer()
-    }
-    buffer.put(b.toByte)
-  }
-
-  override def write(b: Array[Byte], off: Int, len: Int): Unit = {
-    require(!finished, "Stream has been finished. Can not add any more data.")
-    if (buffer.remaining() >= len) {
-      buffer.put(b, off, len)
-    } else {
-      outputBuffer()
-      if (len < buffer.capacity()) {
-        buffer.put(b, off, len)
-      } else {
-        VarInt.encode(len, os)
-        os.write(b, off, len)
-      }
-    }
-  }
-
-  override def flush(): Unit = if (!finished) {
-    outputBuffer()
-    os.flush()
-  }
-
-  def finish(): Unit = if (!finished) {
-    flush()
-    VarInt.encode(0, os)
-    finished = true
-  }
-
-  private def outputBuffer(): Unit = if (buffer.position() > 0) {
-    VarInt.encode(buffer.position(), os)
-    os.write(buffer.array(), buffer.arrayOffset(), buffer.position())
-    buffer.clear()
-  }
-
-}
-
-/** Counterpart for [[BufferedPrefixOutputStream]]. */
-private class BufferedPrefixInputStream(private val is: InputStream) extends InputStream {
-  inputBuffer()
-
-  private var buffer: Array[Byte] = _
-  private var bais: ByteArrayInputStream = _
-  private var finished = false
-
-  override def read(): Int = {
-    inputBuffer()
-    bais.read()
-  }
-
-  override def read(b: Array[Byte], off: Int, len: Int): Int = {
-    var bytesRead = 0
-    var n = 0
-    do {
-      inputBuffer()
-      n = bais.read(b, off + bytesRead, len - bytesRead)
-      if (n > 0) {
-        bytesRead += n
-      }
-    } while (n > 0)
-    bytesRead
-  }
-
-  private def inputBuffer(): Unit = if (!finished) {
-    if (bais == null || bais.available() <= 0) {
-      val len = VarInt.decodeInt(is)
-      if (len == 0) {
-        finished = true
-      } else {
-        if (buffer == null || buffer.length < len) {
-          buffer = Array.ofDim[Byte](math.max(len, 64 * 1024))
-        }
-        is.read(buffer, 0, len)
-        bais = new ByteArrayInputStream(buffer, 0, len)
-      }
-    }
-  }
-
-  def finish(): Unit = if (!finished) {
-    require(VarInt.decodeInt(is) == 0, "Invalid end of input stream")
-  }
-
-}
