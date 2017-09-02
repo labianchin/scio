@@ -17,8 +17,10 @@
 
 package com.spotify.scio.coders
 
-import java.io.{InputStream, OutputStream}
+import java.io.{ByteArrayInputStream, InputStream, OutputStream}
+import java.nio.ByteBuffer
 
+import com.esotericsoftware.kryo.io.{InputChunked, OutputChunked}
 import com.google.common.io.{ByteStreams, CountingOutputStream}
 import com.google.common.reflect.ClassPath
 import com.google.protobuf.Message
@@ -73,16 +75,29 @@ private[scio] class KryoAtomicCoder[T] extends AtomicCoder[T] {
   import KryoAtomicCoder.kryo
 
   private val logger = LoggerFactory.getLogger(this.getClass)
+  private val header = -1
 
   override def encode(value: T, os: OutputStream): Unit = {
-    val output = new Output(os)
+    if (value == null) {
+      throw new CoderException("cannot encode a null value")
+    }
+
+    VarInt.encode(header, os)
+
+    val output = new OutputChunked(os)
     kryo.get().writeClassAndObject(output, value)
+    output.endChunks()
     output.flush()
   }
 
   override def decode(is: InputStream): T = {
-    val obj = kryo.get().readClassAndObject(new Input(is))
-    obj.asInstanceOf[T]
+    val o = if (VarInt.decodeInt(is) == header) {
+      kryo.get().readClassAndObject(new InputChunked(is))
+    } else {
+      kryo.get().readClassAndObject(new Input(is))
+    }
+
+    o.asInstanceOf[T]
   }
 
   // This method is called by PipelineRunner to sample elements in a PCollection and estimate
@@ -173,4 +188,3 @@ private[scio] object KryoAtomicCoder {
     }
   }
 }
-
